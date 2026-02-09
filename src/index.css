@@ -4,21 +4,23 @@
 
 :root {
   font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
-  color: #0e1220;
-  background-color: #f3f5f8;
+  color: #e5edf8;
+  background: transparent;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
 
+html,
 body {
-  min-height: 100vh;
+  height: 100vh;
+  width: 100vw;
   margin: 0;
-  background:
-    radial-gradient(circle at top left, rgba(155, 130, 255, 0.2), transparent 45%),
-    radial-gradient(circle at 20% 80%, rgba(255, 184, 148, 0.2), transparent 45%),
-    linear-gradient(180deg, #f9f8ff 0%, #f2f5fb 45%, #eef1f8 100%);
+  overflow: hidden;
+  background: transparent;
 }
 
 #root {
-  min-height: 100vh;
+  height: 100vh;
+  width: 100vw;
+  background: transparent;
 }

@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import base64
+import binascii
+import importlib
 import os
 import re
-import subprocess
+import threading
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
-DATA_URL_PATTERN = re.compile(r"^data:(?P<mime>[^;]+);base64,(?P<data>.+)$")
+TraceValue = Optional[int] | str
+
+DATA_URL_PATTERN = re.compile(
+    r"^data:(?P<mime>[^;,]+)(?:;[^;,=]+=[^;,]+)*;base64,(?P<data>.+)$"
+)
 MIME_TO_EXT = {
     "video/mp4": ".mp4",
     "video/webm": ".webm",
@@ -27,7 +34,7 @@ class BaseTranscriber:
         frames: Sequence[str],
         fps: float | None = None,
         video_data_url: str | None = None,
-    ) -> str:
+    ) -> tuple[str, dict[str, TraceValue]]:
         raise NotImplementedError
 
 
@@ -39,63 +46,91 @@ class StubTranscriber(BaseTranscriber):
         frames: Sequence[str],
         fps: float | None = None,
         video_data_url: str | None = None,
-    ) -> str:
+    ) -> tuple[str, dict[str, TraceValue]]:
+        start = time.perf_counter()
         frame_count = len(frames)
         fps_info = f" at {fps:.1f} fps" if fps else ""
-        return f"[stub] Received {frame_count} frames{fps_info}."
+        text = f"[stub] Received {frame_count} frames{fps_info}."
+        model_total_ms = int((time.perf_counter() - start) * 1000)
+        return text, {
+            "decodeVideoMs": None,
+            "inferenceMs": 0,
+            "parseOutputMs": None,
+            "modelTotalMs": model_total_ms,
+        }
 
 
 @dataclass
 class AutoAvsrConfig:
     repo_dir: Path
-    python_bin: str
     config_filename: str
     detector: str
+    device: str
     gpu_idx: int
-    timeout_sec: int
 
 
 class AutoAvsrTranscriber(BaseTranscriber):
     name = "autoavsr"
 
     def __init__(self, config: AutoAvsrConfig) -> None:
-        infer_script = config.repo_dir / "infer.py"
-        if not infer_script.exists():
-            raise FileNotFoundError(f"Missing AutoAVSR infer script: {infer_script}")
+        if not config.repo_dir.exists():
+            raise FileNotFoundError(f"Missing AutoAVSR repo: {config.repo_dir}")
+        config_path = Path(config.config_filename)
+        if not config_path.is_absolute():
+            config_path = config.repo_dir / config_path
+        self._config_path = config_path.expanduser().resolve()
+        if not self._config_path.exists():
+            raise FileNotFoundError(f"Missing AutoAVSR config: {self._config_path}")
+
         self.config = config
+        self.runtime_device, self.runtime_device_reason = self._resolve_runtime_device(
+            config.device,
+            config.gpu_idx,
+        )
+        self._inference_lock = threading.Lock()
+        self._pipeline = self._load_pipeline()
 
     def transcribe(
         self,
         frames: Sequence[str],
         fps: float | None = None,
         video_data_url: str | None = None,
-    ) -> str:
+    ) -> tuple[str, dict[str, TraceValue]]:
+        model_start = time.perf_counter()
         if not video_data_url:
             raise ValueError(
                 "AutoAVSR requires `videoDataUrl` in the request payload."
             )
 
         with tempfile.TemporaryDirectory(prefix="telepathy-avsr-") as tmp_dir:
+            decode_start = time.perf_counter()
             video_path = self._write_video_file(video_data_url, Path(tmp_dir))
-            cmd = [
-                self.config.python_bin,
-                "infer.py",
-                f"config_filename={self.config.config_filename}",
-                f"data_filename={video_path}",
-                f"detector={self.config.detector}",
-                f"gpu_idx={self.config.gpu_idx}",
-            ]
-            proc = subprocess.run(
-                cmd,
-                cwd=self.config.repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout_sec,
-            )
-            if proc.returncode != 0:
-                tail = self._tail_lines(proc.stderr or proc.stdout)
-                raise RuntimeError(f"AutoAVSR inference failed: {tail}")
-            return self._parse_transcript(proc.stdout, proc.stderr)
+            decode_video_ms = int((time.perf_counter() - decode_start) * 1000)
+            inference_start = time.perf_counter()
+            with self._inference_lock:
+                text, inference_trace = self._pipeline(
+                    video_path,
+                    None,
+                    return_trace=True,
+                )
+            inference_ms = int((time.perf_counter() - inference_start) * 1000)
+            parse_start = time.perf_counter()
+            parsed_text = str(text).strip()
+            if not parsed_text:
+                raise RuntimeError("AutoAVSR produced empty transcription output.")
+            parse_output_ms = int((time.perf_counter() - parse_start) * 1000)
+            model_total_ms = int((time.perf_counter() - model_start) * 1000)
+            return parsed_text, {
+                "decodeVideoMs": decode_video_ms,
+                "inferenceMs": inference_ms,
+                "parseOutputMs": parse_output_ms,
+                "modelTotalMs": model_total_ms,
+                "landmarksMs": inference_trace.get("landmarksMs"),
+                "dataLoadMs": inference_trace.get("dataLoadMs"),
+                "encodeMs": inference_trace.get("encodeMs"),
+                "beamSearchMs": inference_trace.get("beamSearchMs"),
+                "postprocessMs": inference_trace.get("postprocessMs"),
+            }
 
     @staticmethod
     def _write_video_file(video_data_url: str, out_dir: Path) -> str:
@@ -103,39 +138,61 @@ class AutoAvsrTranscriber(BaseTranscriber):
         if not match:
             raise ValueError("`videoDataUrl` must be a valid base64 data URL.")
 
-        mime_type = match.group("mime")
+        mime_type = match.group("mime").lower()
         payload = match.group("data")
         ext = MIME_TO_EXT.get(mime_type, ".bin")
         out_path = out_dir / f"capture{ext}"
-        out_path.write_bytes(base64.b64decode(payload))
+        try:
+            out_path.write_bytes(base64.b64decode(payload, validate=True))
+        except binascii.Error as exc:
+            raise ValueError("`videoDataUrl` contains invalid base64 data.") from exc
         return str(out_path)
 
-    @staticmethod
-    def _parse_transcript(stdout: str, stderr: str) -> str:
-        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-        for line in reversed(lines):
-            lower = line.lower()
-            if (
-                lower.startswith("prediction:")
-                or lower.startswith("predicted text:")
-                or lower.startswith("hyp:")
-            ):
-                return line.split(":", 1)[1].strip().strip('"')
-
-        if lines:
-            return lines[-1].strip().strip('"')
-
-        err_lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-        if err_lines:
-            return err_lines[-1]
-        raise RuntimeError("AutoAVSR produced no parseable transcription output.")
+    def _load_pipeline(self):
+        repo_dir = str(self.config.repo_dir)
+        if repo_dir not in sys.path:
+            sys.path.insert(0, repo_dir)
+        pipeline_module = importlib.import_module("pipelines.pipeline")
+        inference_cls = getattr(pipeline_module, "InferencePipeline")
+        return inference_cls(
+            str(self._config_path),
+            detector=self.config.detector,
+            face_track=True,
+            device=self.runtime_device,
+        )
 
     @staticmethod
-    def _tail_lines(output: str, max_lines: int = 8) -> str:
-        lines = [line.strip() for line in output.splitlines() if line.strip()]
-        if not lines:
-            return "no logs captured"
-        return " | ".join(lines[-max_lines:])
+    def _resolve_runtime_device(preferred: str, gpu_idx: int) -> tuple[str, str]:
+        try:
+            import torch
+        except Exception:
+            return "cpu", "torch-unavailable"
+
+        requested = (preferred or "auto").strip().lower()
+        if requested and requested != "auto":
+            if requested.startswith("cuda"):
+                if torch.cuda.is_available():
+                    return requested, "user-requested"
+                print(
+                    f"Requested TELEPATHY_AUTOAVSR_DEVICE={requested}, but CUDA is unavailable."
+                )
+            elif requested == "mps":
+                if torch.backends.mps.is_available():
+                    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+                    return "mps", "user-requested"
+                print(
+                    "Requested TELEPATHY_AUTOAVSR_DEVICE=mps, but MPS is unavailable."
+                )
+            elif requested == "cpu":
+                return "cpu", "user-requested"
+            else:
+                print(f"Unknown TELEPATHY_AUTOAVSR_DEVICE={requested!r}; using auto.")
+
+        if torch.cuda.is_available() and gpu_idx >= 0:
+            return f"cuda:{gpu_idx}", "auto-cuda"
+        if torch.backends.mps.is_available():
+            return "cpu", "auto-cpu-on-apple-silicon"
+        return "cpu", "auto-cpu"
 
 
 def load_model() -> BaseTranscriber:
@@ -159,17 +216,14 @@ def load_model() -> BaseTranscriber:
             )
             return StubTranscriber()
 
-        python_bin = os.getenv("TELEPATHY_AUTOAVSR_PYTHON", sys.executable)
-
         config = AutoAvsrConfig(
             repo_dir=Path(repo_path).expanduser().resolve(),
-            python_bin=python_bin,
             config_filename=os.getenv(
                 "TELEPATHY_AUTOAVSR_CONFIG", "configs/LRS3_V_WER19.1.ini"
             ),
             detector=os.getenv("TELEPATHY_AUTOAVSR_DETECTOR", "mediapipe"),
+            device=os.getenv("TELEPATHY_AUTOAVSR_DEVICE", "mps").strip().lower(),
             gpu_idx=int(os.getenv("TELEPATHY_AUTOAVSR_GPU_IDX", "-1")),
-            timeout_sec=int(os.getenv("TELEPATHY_AUTOAVSR_TIMEOUT_SEC", "240")),
         )
         try:
             return AutoAvsrTranscriber(config)

@@ -10,11 +10,25 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "Telepathy",
-        "width": 800,
-        "height": 600,
+        "title": "Telepathy Overlay",
+        "width": 520,
+        "height": 420,
+        "minWidth": 520,
+        "maxWidth": 520,
+        "minHeight": 420,
+        "maxHeight": 420,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "focus": true,
+        "x": 24,
+        "y": 24,
         "useHttpsScheme": true
       }
     ],
