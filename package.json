@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:dev": "VITE_DEV_SKIP=1 npx tauri dev",
     "tauri:dev-app": "./scripts/dev_debug_app.sh"
   },
   "dependencies": {

@@ -1,8 +1,6 @@
 use std::process::Command;
 
 use tauri::{Emitter, Manager};
-#[cfg(target_os = "macos")]
-use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri_plugin_global_shortcut::ShortcutState;
 
 const HOLD_TO_RECORD_SHORTCUT: &str = "CommandOrControl+Shift+Space";
@@ -183,22 +181,14 @@ fn set_overlay_passthrough(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .setup(|app| {
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(window) = app.get_webview_window("main") {
-                    let effects = EffectsBuilder::new()
-                        .effect(Effect::HudWindow)
-                        .state(EffectState::Active)
-                        .radius(20.0)
-                        .build();
-                    if let Err(err) = window.set_effects(Some(effects)) {
-                        eprintln!("failed to apply macOS vibrancy: {err}");
-                    }
-                }
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
             }
-            Ok(())
-        })
+        }))
+        .setup(|_app| Ok(()))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_shortcuts([HOLD_TO_RECORD_SHORTCUT])

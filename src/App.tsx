@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const SERVER_BASE_URL = "http://127.0.0.1:8000";
@@ -9,6 +8,7 @@ const HEALTH_URL = `${SERVER_BASE_URL}/health`;
 const HEALTH_POLL_MS = 1500;
 const OVERLAY_HIDE_MS = 1300;
 const HOTKEY_LABEL = "Cmd/Ctrl + Shift + Space";
+const DEV_SKIP = import.meta.env.VITE_DEV_SKIP === "1";
 
 type OverlayState =
   | "idle"
@@ -174,15 +174,13 @@ function App() {
   }, [cameraReady]);
 
   const openPermissionSettings = useCallback(async (panel: "camera" | "accessibility") => {
-    const url =
-      panel === "camera"
-        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
-        : "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
     try {
-      await openUrl(url);
-    } catch {
+      await invoke("open_system_settings", { panel });
+      setOnboardingError("");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
       setOnboardingError(
-        "Unable to open System Settings automatically. Open Privacy & Security manually.",
+        `Unable to open System Settings automatically. Open Privacy & Security manually.${detail ? ` (${detail})` : ""}`,
       );
     }
   }, []);
@@ -490,6 +488,16 @@ function App() {
     }
   }, [accessibilityGranted, cameraReady, setOverlayPassthrough, setTimedIdle]);
 
+  const skipOnboarding = useCallback(async () => {
+    try {
+      await setOverlayPassthrough(true);
+      setOnboardingComplete(true);
+      setOverlayState("idle");
+    } catch (err) {
+      setOnboardingError(err instanceof Error ? err.message : "Unable to skip onboarding.");
+    }
+  }, [setOverlayPassthrough]);
+
   const visible = overlayState !== "idle";
   const stateUi = useMemo(() => {
     switch (overlayState) {
@@ -537,21 +545,24 @@ function App() {
   const accessibilityStatusLabel = accessibilityGranted ? "Granted" : "Missing";
 
   return (
-    <div className="h-full w-full">
+    <div className="h-full w-full text-slate-100">
       {!onboardingComplete && (
-        <div className="fixed inset-0 flex items-center justify-center p-4">
-          <div className="max-h-full w-[440px] overflow-y-auto rounded-3xl border border-slate-300/40 bg-slate-900/85 p-5 text-slate-100 shadow-2xl backdrop-blur-xl">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-300">
+        <div className="h-full w-full rounded-2xl bg-slate-950/95">
+          <div className="h-full overflow-y-auto px-4 py-4">
+            <p
+              data-tauri-drag-region
+              className="cursor-grab text-xs font-semibold uppercase tracking-[0.18em] text-slate-300"
+            >
               Telepathy Setup
             </p>
-            <h1 className="mt-2 text-lg font-semibold">Permissions onboarding</h1>
+            <h1 className="mt-1 text-lg font-semibold">Permissions onboarding</h1>
             <p className="mt-2 text-sm text-slate-300">
               Grant macOS permissions once, then hold {lastHotkey || HOTKEY_LABEL} to record and
               release to paste transcription.
             </p>
 
             <div className="mt-4 space-y-3 text-sm">
-              <div className="rounded-2xl border border-slate-500/30 bg-slate-800/75 p-3">
+              <div className="rounded-2xl border border-slate-500/30 bg-slate-800/80 p-3">
                 <div className="flex items-center justify-between">
                   <span className="font-medium">Camera</span>
                   <span className={statusTone(cameraReady)}>{cameraStatusLabel}</span>
@@ -581,7 +592,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-slate-500/30 bg-slate-800/75 p-3">
+              <div className="rounded-2xl border border-slate-500/30 bg-slate-800/80 p-3">
                 <div className="flex items-center justify-between">
                   <span className="font-medium">Accessibility</span>
                   <span className={statusTone(accessibilityGranted)}>
@@ -615,7 +626,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-slate-500/30 bg-slate-800/75 p-3">
+              <div className="rounded-2xl border border-slate-500/30 bg-slate-800/80 p-3">
                 <div className="flex items-center justify-between">
                   <span className="font-medium">Backend</span>
                   <span
@@ -643,6 +654,16 @@ function App() {
             >
               Start Overlay Mode
             </button>
+            {DEV_SKIP && (
+              <button
+                className="mt-2 w-full rounded-full border border-slate-500/50 px-4 py-2 text-sm font-semibold text-slate-300 hover:bg-slate-700/70"
+                onClick={() => {
+                  void skipOnboarding();
+                }}
+              >
+                Skip (dev)
+              </button>
+            )}
           </div>
         </div>
       )}
