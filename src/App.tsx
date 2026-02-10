@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const SERVER_BASE_URL = "http://127.0.0.1:8000";
@@ -161,8 +162,8 @@ function App() {
         },
         audio: false,
       });
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = stream;
+      // Stop immediately — we just needed to verify permission is granted.
+      stream.getTracks().forEach((track) => track.stop());
       setCameraReady(true);
       setCameraError(null);
     } catch (err) {
@@ -249,7 +250,7 @@ function App() {
     recorderRef.current = recorder;
   }, []);
 
-  const handleHotkeyPressed = useCallback(() => {
+  const handleHotkeyPressed = useCallback(async () => {
     if (!overlayModeRef.current) {
       return;
     }
@@ -276,6 +277,21 @@ function App() {
       if (hideTimerRef.current !== null) {
         window.clearTimeout(hideTimerRef.current);
       }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "user",
+          width: { ideal: 960 },
+          height: { ideal: 540 },
+        },
+        audio: false,
+      });
+      // If the key was released while acquiring the stream, bail out.
+      if (!hotkeyDownRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = stream;
       startRecorder();
       setLastTranscript("");
       setOverlayState("recording");
@@ -315,6 +331,9 @@ function App() {
       const videoDataUrl = await encodeBlob(blob);
       const track = streamRef.current?.getVideoTracks()[0];
       const settings = track?.getSettings();
+      // Release the camera as soon as we have the blob and settings.
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
       const response = await fetch(TRANSCRIBE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -356,6 +375,9 @@ function App() {
       setOverlayDetail(pasted ? "Pasted into active app." : "Copied to clipboard.");
       setTimedIdle(OVERLAY_HIDE_MS);
     } catch (err) {
+      // Ensure the camera is released even if encoding or network fails.
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
       showError(err instanceof Error ? err.message : "Transcription failed.");
     }
   }, [encodeBlob, overlayState, setTimedIdle, showError]);
@@ -547,11 +569,20 @@ function App() {
   return (
     <div className="h-full w-full text-slate-100">
       {!onboardingComplete && (
-        <div className="h-full w-full rounded-2xl bg-slate-950/95">
+        <div
+          className="h-full w-full rounded-2xl bg-slate-950/95"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              void getCurrentWindow().startDragging();
+            }
+          }}
+        >
           <div className="h-full overflow-y-auto px-4 py-4">
             <p
-              data-tauri-drag-region
               className="cursor-grab text-xs font-semibold uppercase tracking-[0.18em] text-slate-300"
+              onMouseDown={() => {
+                void getCurrentWindow().startDragging();
+              }}
             >
               Telepathy Setup
             </p>
