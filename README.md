@@ -57,6 +57,8 @@ After onboarding, use the global hotkey:
 
 A small overlay pill appears while recording/processing and auto-hides after completion.
 
+The capture pipeline targets 25 FPS and the backend normalizes incoming clips to the model FPS.
+
 ## Model backend (AutoAVSR)
 
 The backend now supports an AutoAVSR transcriber adapter in `server/model.py`.

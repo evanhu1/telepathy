@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from configparser import ConfigParser
 import importlib
 import os
 import re
@@ -13,7 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-TraceValue = Optional[int] | str
+TraceValue = Optional[int | float] | str
+
+DEFAULT_MODEL_VIDEO_FPS = 25.0
 
 DATA_URL_PATTERN = re.compile(
     r"^data:(?P<mime>[^;,]+)(?:;[^;,=]+=[^;,]+)*;base64,(?P<data>.+)$"
@@ -83,6 +86,7 @@ class AutoAvsrTranscriber(BaseTranscriber):
             raise FileNotFoundError(f"Missing AutoAVSR config: {self._config_path}")
 
         self.config = config
+        self.model_video_fps = self._read_model_video_fps(self._config_path)
         self.runtime_device, self.runtime_device_reason = self._resolve_runtime_device(
             config.device,
             config.gpu_idx,
@@ -106,8 +110,14 @@ class AutoAvsrTranscriber(BaseTranscriber):
             decode_start = time.perf_counter()
             video_path = self._write_video_file(video_data_url, Path(tmp_dir))
             decode_video_ms = int((time.perf_counter() - decode_start) * 1000)
+            input_video_fps = (
+                float(fps)
+                if fps is not None and fps > 0
+                else self._probe_video_fps(video_path)
+            )
             inference_start = time.perf_counter()
             with self._inference_lock:
+                applied_speed_rate = self._apply_input_fps(input_video_fps)
                 text, inference_trace = self._pipeline(
                     video_path,
                     None,
@@ -130,6 +140,9 @@ class AutoAvsrTranscriber(BaseTranscriber):
                 "encodeMs": inference_trace.get("encodeMs"),
                 "beamSearchMs": inference_trace.get("beamSearchMs"),
                 "postprocessMs": inference_trace.get("postprocessMs"),
+                "inputFps": round(input_video_fps, 2) if input_video_fps else None,
+                "modelVfps": round(self.model_video_fps, 2),
+                "speedRate": round(applied_speed_rate, 4),
             }
 
     @staticmethod
@@ -147,6 +160,42 @@ class AutoAvsrTranscriber(BaseTranscriber):
         except binascii.Error as exc:
             raise ValueError("`videoDataUrl` contains invalid base64 data.") from exc
         return str(out_path)
+
+    @staticmethod
+    def _read_model_video_fps(config_path: Path) -> float:
+        parser = ConfigParser()
+        parser.read(config_path)
+        try:
+            model_v_fps = parser.getfloat("model", "v_fps")
+            if model_v_fps > 0:
+                return model_v_fps
+        except Exception:
+            pass
+        return DEFAULT_MODEL_VIDEO_FPS
+
+    @staticmethod
+    def _probe_video_fps(video_path: str) -> float | None:
+        try:
+            import cv2
+        except Exception:
+            return None
+
+        capture = cv2.VideoCapture(video_path)
+        try:
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            return fps if fps > 0 else None
+        finally:
+            capture.release()
+
+    def _apply_input_fps(self, input_video_fps: float | None) -> float:
+        if input_video_fps is None or input_video_fps <= 0 or self.model_video_fps <= 0:
+            speed_rate = 1.0
+        else:
+            speed_rate = max(input_video_fps / self.model_video_fps, 0.05)
+        transforms_module = importlib.import_module("pipelines.data.transforms")
+        video_transform_cls = getattr(transforms_module, "VideoTransform")
+        self._pipeline.dataloader.video_transform = video_transform_cls(speed_rate=speed_rate)
+        return speed_rate
 
     def _load_pipeline(self):
         repo_dir = str(self.config.repo_dir)

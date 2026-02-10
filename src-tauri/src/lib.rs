@@ -1,6 +1,8 @@
 use std::process::Command;
 
 use tauri::{Emitter, Manager};
+#[cfg(target_os = "macos")]
+use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri_plugin_global_shortcut::ShortcutState;
 
 const HOLD_TO_RECORD_SHORTCUT: &str = "CommandOrControl+Shift+Space";
@@ -23,6 +25,13 @@ struct PasteResult {
 struct AccessibilityStatus {
     granted: bool,
     detail: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SettingsPanel {
+    Camera,
+    Accessibility,
 }
 
 #[tauri::command]
@@ -106,6 +115,59 @@ fn check_accessibility_permission() -> AccessibilityStatus {
 }
 
 #[tauri::command]
+fn open_system_settings(panel: SettingsPanel) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let urls: &[&str] = match panel {
+            SettingsPanel::Camera => &[
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Camera",
+                "x-apple.systempreferences:com.apple.preference.security",
+            ],
+            SettingsPanel::Accessibility => &[
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+                "x-apple.systempreferences:com.apple.preference.security",
+            ],
+        };
+
+        let mut last_error: Option<String> = None;
+
+        for url in urls {
+            let output = Command::new("open")
+                .arg(url)
+                .output()
+                .map_err(|err| format!("Unable to execute 'open' for {url}: {err}"))?;
+            if output.status.success() {
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let status = output
+                .status
+                .code()
+                .map_or_else(|| "unknown".to_string(), |code| code.to_string());
+            let detail = if stderr.is_empty() {
+                format!("open exited with status {status} for {url}")
+            } else {
+                format!("open exited with status {status} for {url}: {stderr}")
+            };
+            last_error = Some(detail);
+        }
+
+        return Err(
+            last_error.unwrap_or_else(|| "Unable to open System Settings.".to_string()),
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = panel;
+        Err("System Settings deep link is only implemented on macOS.".to_string())
+    }
+}
+
+#[tauri::command]
 fn set_overlay_passthrough(
     app: tauri::AppHandle,
     ignore_cursor_events: bool,
@@ -121,6 +183,22 @@ fn set_overlay_passthrough(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let effects = EffectsBuilder::new()
+                        .effect(Effect::HudWindow)
+                        .state(EffectState::Active)
+                        .radius(20.0)
+                        .build();
+                    if let Err(err) = window.set_effects(Some(effects)) {
+                        eprintln!("failed to apply macOS vibrancy: {err}");
+                    }
+                }
+            }
+            Ok(())
+        })
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_shortcuts([HOLD_TO_RECORD_SHORTCUT])
@@ -143,6 +221,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             paste_text,
             check_accessibility_permission,
+            open_system_settings,
             set_overlay_passthrough
         ])
         .plugin(tauri_plugin_opener::init())
