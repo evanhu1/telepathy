@@ -1,4 +1,6 @@
-# Telepathy (visual speech prototype)
+# Telepathy
+
+Telepathy is silent audio dictation, AKA mouthreading. Allegedly what Q.ai, the AI company bought by Apple for $2B is solving.
 
 A Tauri desktop app for macOS that works as a hold-to-record hotkey overlay: while the hotkey is held, webcam video is captured; on release, the clip is sent to a local Python server for visual speech (lipreading) inference and pasted as text.
 
